@@ -1,0 +1,139 @@
+Prerequisites:
+  1. Install WSL: can follow the guide here: https://learn.microsoft.com/en-us/windows/wsl/install
+  2. Docker Desktop: https://docs.docker.com/desktop/install/mac-install/
+  3. Signup a bigquery account and create a project, a dataset and a table
+
+Steps:
+1. create a folder in a preferred location, mine called "airflow-docker" under ":c/Users/siton"
+2. fetch docker-compose file using the terminal: curl -LfO 'https://airflow.apache.org/docs/apache-airflow/2.10.0/docker-compose.yaml', can refer to this link for the latest version: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
+3. create folders within the "airflow-docker" folder we just created:
+   cd airflow-docker
+   mkdir -p ./dags ./logs ./plugins
+   echo -e "AIRFLOW_UID=$(id -u)\nAIRFLOW_GID=0" > .env
+4. create a DAG py file within the "dags" folder we just created with the following scripts and remember to set dag id (mine is "bigquery_demo") and input the value for 3 variables BQ_CONN_ID (i.e. airflow connection with bigquery, can leave it blank first), BQ_PROJECT and BQ_DATASET
+
+  import json
+  from datetime import timedelta, datetime
+
+  from airflow import DAG
+
+  from airflow.contrib.operators.bigquery_operator import BigQueryOperator
+  from airflow.providers.google.cloud.operators.bigquery import BigQueryCheckOperator
+
+  default_args = {
+    'owner': 'airflow',
+    'depends_on_past': True,    
+    'start_date': datetime(2024, 8, 18),
+    'end_date': datetime(2024, 8, 31),
+    'email': ['airflow@airflow.com'],
+    'email_on_failure': True,
+    'email_on_retry': False,
+    'retries': 2,
+    'retry_delay': timedelta(minutes=5),
+  }
+
+  # Set Schedule: Run pipeline once a day. 
+  # Use cron to define exact time. Eg. 8:15am would be "15 08 * * *"
+  schedule_interval = "44 21 * * *"
+
+  # Define DAG: Set ID and assign default args and schedule interval
+  dag = DAG(
+    'bigquery_demo', 
+    default_args=default_args, 
+    schedule_interval=schedule_interval
+      )
+
+  # Config variables
+  BQ_CONN_ID = "my_gcp_conn"
+  BQ_PROJECT = "pigpig-project-432914"
+  BQ_DATASET = "pigpigdata"
+
+  ## Task 1: check that the data table is existed in the dataset
+
+  t1 = BigQueryCheckOperator(
+        task_id='bq_check_data',
+        sql='''
+        SELECT
+            COUNT(DISTINCT industry) AS ct
+        FROM
+        `pigpig-project-432914.pigpigdata.2023climate`
+        ''',
+        use_legacy_sql=False,
+        gcp_conn_id = BQ_CONN_ID,
+        dag=dag
+    )
+
+
+
+  # ## Task 2: Run a query and store the result to another table
+  t2 = BigQueryOperator(
+        task_id='bq_write_to_climate_inter',
+        sql='''
+        #standardSQL
+        SELECT
+          *,
+          ROW_NUMBER() OVER (PARTITION BY industry ORDER BY value DESC) AS rn
+        FROM `pigpig-project-432914.pigpigdata.2023climate` 
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY industry ORDER BY value DESC) = 1
+        ''',
+        destination_dataset_table='{0}.{1}.climate_inter'.format(
+            BQ_PROJECT, BQ_DATASET
+        ),    
+        write_disposition='WRITE_TRUNCATE',
+        allow_large_results=True,
+        use_legacy_sql=False,
+        gcp_conn_id=BQ_CONN_ID,
+        dag=dag
+      )
+
+  # # Task 3: Check if inter data is written successfully
+  t3 = BigQueryCheckOperator(
+    task_id='bq_check_climate_inter',
+    sql='''
+    #standardSQL
+    SELECT
+        COUNT(*) AS rows_in_partition
+    FROM `{0}.{1}.climate_inter`
+    '''.format(BQ_PROJECT, BQ_DATASET
+        ),
+    use_legacy_sql=False,
+    gcp_conn_id=BQ_CONN_ID,
+    dag=dag)
+
+  #Setting up Dependencies
+  t2.set_upstream(t1)
+  t3.set_upstream(t2)
+
+4. create a service account from GCP to allow access from our local machine to the GCP: 
+  open the GCP "Naviagtion menu", click "IAM and Admin", click "Service accounts", 
+  click the "CREATE SERVICE ACCOUNT" button, input Service account name, click "CREATE AND CONTINUE", select a proper role and click "CONTINUE", click "DONE"
+
+5. generate a JSON key for the service account we just created: under the "Action" pannel on the right hand side, click "Manage details", click "KEYS", click "ADD KEY", click "Create new key", a new JSON key which will be download automatically. 
+   Create a folder called "support" within folder "dags" and create a folder called "keys" within the folder "support" and move the key file to the "keys" folder
+
+6. run command to initialise the environment: docker-compose up airflow-init
+
+7. run command: docker-compose up, once it’s finished will see the airflow-webserver keeps updating the health status and display the message in the terminal.
+
+8. Access the Airflow UI by using your web brower entering the following address: http://localhost:8080/home, use “airflow” as id and password. 
+
+9. create a connection with google clound: click "Admin", click "Connections", click "Add a new record", configure the connection as follows and then click "Save"
+   Connection Id: my_gcp_conn (can be any name)
+   Connection Type: Google Cloud
+   Project Id: bigquery project id, mine is "pigpig-project-432914"
+   Keyfile Path: starts with /opt/airflow/dags/, mine is "/opt/airflow/dags/support/keys/pigpig-project-432914-32f163bcf106.json"
+   Scopes (comma separated): https://www.googleapis.com/auth/cloud-platform
+
+10. put the connection id , mine is "my_gcp_conn" as the value for the variable "BQ_CONN_ID" in the dag file
+
+11. test run: docker-compose -f docker-compose.yaml run --rm airflow-webserver airflow tasks test bigquery_demo bq_check_data 2024-08-18
+              docker-compose -f docker-compose.yaml run --rm airflow-webserver airflow tasks test (DAG id) (task_id) (execute date)
+
+12. Go to airflow UI and toggle the dag we just created, it will run the task according to the schedule we set up
+
+   
+
+
+
+
+
