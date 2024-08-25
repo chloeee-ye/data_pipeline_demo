@@ -1,0 +1,165 @@
+Prerequisites:
+  1. Install WSL: can follow the guide here: https://learn.microsoft.com/en-us/windows/wsl/install
+  2. Docker Desktop: https://docs.docker.com/desktop/install/mac-install/
+  3. Signup a bigquery account and create a project, a dataset and a table
+  4. A Google Cloud Function deployed for downloading data from website and can be triggered by HTTP, my cloud function called "scraping-function-001"
+     * we can set it as public for easier access for our own study and experiment purpose through:
+       1) click the cloud function you deployed, click the "PERMISSIONS" tab, click "GRANT ACCESS", input "allUsers" as new principles, choose "Cloud Function Invokers" as role, click save
+       2) click "View in Cloud Run" on the top right corner, click the "SECURITY" tab, choose "Allow unauthenticated invocations"
+  5. A bucket created in Google Cloud Storage
+
+
+  Steps:
+1. create a folder in a preferred location, mine called "airflow-docker" under ":c/Users/siton"
+2. fetch docker-compose file using the terminal: curl -LfO 'https://airflow.apache.org/docs/apache-airflow/2.10.0/docker-compose.yaml', can refer to this link for the latest version: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
+3. create folders within the "airflow-docker" folder we just created:
+   cd airflow-docker
+   mkdir -p ./dags ./logs ./plugins
+   echo -e "AIRFLOW_UID=$(id -u)\nAIRFLOW_GID=0" > .env
+4. create a DAG py file within the "dags" folder we just created with the following scripts and remember to set dag id (mine is "bigquery_demo2") and input the value for 4 variables: 
+   1) HTTP_CONN_ID: Airflow connection ID for HTTP, can leave it blank first
+   2) BQ_CONN_ID: airflow connection with bigquery, can leave it blank first
+   3) BQ_PROJECT 
+   4) BQ_DATASET
+
+import json
+from datetime import timedelta, datetime
+
+from airflow import DAG
+from airflow.providers.http.sensors.http import HttpSensor
+from airflow.providers.http.operators.http import SimpleHttpOperator
+
+
+from airflow.contrib.operators.bigquery_operator import BigQueryOperator
+from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
+from airflow.contrib.operators.bigquery_check_operator import BigQueryCheckOperator
+
+from airflow.macros import ds_format, ds_add
+
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,    
+    'start_date': datetime(2024, 8, 24),
+    'email': ['airflow@airflow.com'],
+    'email_on_failure': True,
+    'email_on_retry': False,
+    'retries': 2,
+    'retry_delay': timedelta(minutes=5),
+}
+
+# Set Schedule: Run pipeline once a day. 
+# Use cron to define exact time. Eg. 8:15am would be "15 08 * * *"
+schedule_interval = "32 15 * * *"
+
+# Define DAG: Set ID and assign default args and schedule interval
+with DAG(
+    'LondonCrimeDataPipeline',
+    start_date=datetime(2024, 8, 24),
+    schedule_interval=schedule_interval,
+    default_args=default_args,
+    max_active_runs=1,
+    template_searchpath="/opt/airflow/dags/sql",
+    catchup=True,
+) as dag:
+
+    # Config variables
+    HTTP_CONN_ID = "puton_conn_id"
+    BQ_CONN_ID = "my_gcp_conn"
+    BQ_PROJECT = "pigpig-project-432914"
+    BQ_DATASET = "pigpigdata"
+
+    ## Task 1: trigger the cloud function to fetch crime data  
+    trigger_cloud_function = SimpleHttpOperator(
+        task_id='trigger_cloud_function',
+        http_conn_id='puton_conn_id', 
+        endpoint='<cloud-function-endpoint>/scraping-function-001/?date={{ ds }}',
+        headers={"Content-Type": "application/json"},
+        method='POST',
+        response_check=lambda response: response.status_code == 200
+    )
+
+    # ## Task 2: load the downloaded csv into the BigQuery table
+    load_csv_to_bigquery = GCSToBigQueryOperator(
+            task_id='load_csv_to_bigquery',
+            gcp_conn_id='my_gcp_conn',
+            bucket='puton_bucket_001',  # Replace with your GCS bucket name
+            source_objects=['website_data.csv'],  # Replace with the path to your CSV file in the bucket
+            destination_project_dataset_table='{0}.{1}.website_data_raw'.format(
+                BQ_PROJECT, BQ_DATASET
+            ),  
+            create_disposition='CREATE_IF_NEEDED',  # Create the table if it doesn't exist
+            write_disposition='WRITE_TRUNCATE',  # Overwrite the table if it already exists
+            skip_leading_rows=1,  # Skip the header row
+            source_format='CSV',
+            autodetect=True,  # Automatically detect the schema from the CSV file
+        )
+
+    ## Task 3: fetch and clean the raw data from the website_data_raw table and insert the data to the staging dataset
+    clean_and_insert = BigQueryOperator(
+            task_id='cleaning_crime_data_insert',
+            sql='''
+                SELECT 
+                *
+                FROM `pigpig-project-432914.pigpigdata.website_data_raw`
+                WHERE id IS NOT NULL
+            ''',
+            destination_dataset_table=f"{ BQ_PROJECT }.{ BQ_DATASET }.website_data$" + "{{ ds_nodash[:6] }}",    
+            write_disposition='WRITE_TRUNCATE',
+            create_disposition='CREATE_IF_NEEDED',
+            allow_large_results=True,
+            use_legacy_sql=False,
+            time_partitioning={"type": "MONTH", "field": "date_month"},
+            gcp_conn_id=BQ_CONN_ID,
+            dag=dag
+        )
+
+    # Task 4: Check if the raw data is written successfully
+    check_agg_data = BigQueryCheckOperator(
+        task_id='check_data',
+        sql='''
+        SELECT
+            COUNT(*) AS rows_in_partition
+        FROM `{0}.{1}.website_data_raw`
+        '''.format(BQ_PROJECT, BQ_DATASET
+            ),
+        use_legacy_sql=False,
+        gcp_conn_id=BQ_CONN_ID,
+        dag=dag)
+
+    Setting up Dependencies
+    trigger_cloud_function >> load_csv_to_bigquery >> clean_and_insert >> check_data
+
+5. create a service account from GCP to allow access from our local machine to the GCP: 
+  open the GCP "Naviagtion menu", click "IAM and Admin", click "Service accounts", 
+  click the "CREATE SERVICE ACCOUNT" button, input Service account name, click "CREATE AND CONTINUE", select a proper role and click "CONTINUE", click "DONE"
+
+5. generate a JSON key for the service account we just created: under the "Action" pannel on the right hand side, click "Manage details", click "KEYS", click "ADD KEY", click "Create new key", a new JSON key which will be download automatically. 
+   Create a folder called "support" within folder "dags" and create a folder called "keys" within the folder "support" and move the key file to the "keys" folder
+
+6. run command to initialise the environment: docker-compose up airflow-init
+
+7. run command: docker-compose up, once it’s finished will see the airflow-webserver keeps updating the health status and display the message in the terminal.
+
+8. Access the Airflow UI by using your web brower entering the following address: http://localhost:8080/home, use “airflow” as id and password. 
+
+9. create a connection with google clound: click "Admin", click "Connections", click "Add a new record", configure the connection as follows and then click "Save"
+   Connection Id: my_gcp_conn (can be any name)
+   Connection Type: Google Cloud
+   Project Id: bigquery project id, mine is "pigpig-project-432914"
+   Keyfile Path: starts with /opt/airflow/dags/, mine is "/opt/airflow/dags/support/keys/pigpig-project-432914-32f163bcf106.json"
+   Scopes (comma separated): https://www.googleapis.com/auth/cloud-platform
+
+10. create Airflow connection ID for HTTP: click "Admin", click "Connections", click "Add a new record", configure the connection as follows and then click "Save"
+   Connection Id: puton_conn_id (can be any name)
+   Connection Type: HTTP
+   Host: cloud function url, mine is "https://us-central1-pigpig-project-432914.cloudfunctions.net/scraping-function-001"
+
+11. put the connection id , mine is "my_gcp_conn" as the value for the variable "BQ_CONN_ID" and HTTP connection id, mine is "puton_conn_id" as the value for the variable "HTTP_CONN_ID" in the dag file
+
+12. test run: docker-compose -f docker-compose.yaml run --rm airflow-webserver airflow tasks test trigger_cloud_function 2024-08-18
+              docker-compose -f docker-compose.yaml run --rm airflow-webserver airflow tasks test (DAG id) (task_id) (execute date)
+
+13. Go to airflow UI and toggle the dag we just created, it will run the task according to the schedule we set up
+
+  
