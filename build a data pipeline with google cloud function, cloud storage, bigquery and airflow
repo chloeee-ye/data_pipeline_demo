@@ -10,10 +10,10 @@ Prerequisites:
 
 
   Steps:
-1. create a folder in a preferred location, mine called "airflow-docker" under ":c/Users/siton"
+1. create a folder in a preferred location, mine called "OSP-airflow-docker" under ":c/Users/siton"
 2. fetch docker-compose file using the terminal: curl -LfO 'https://airflow.apache.org/docs/apache-airflow/2.10.0/docker-compose.yaml', can refer to this link for the latest version: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
 3. create folders within the "airflow-docker" folder we just created:
-   cd airflow-docker
+   cd OSP-airflow-docker
    mkdir -p ./dags ./logs ./plugins
    echo -e "AIRFLOW_UID=$(id -u)\nAIRFLOW_GID=0" > .env
 4. create a DAG py file within the "dags" folder we just created with the following scripts and remember to set dag id (mine is "bigquery_demo2") and input the value for 4 variables: 
@@ -153,7 +153,7 @@ with DAG(
 10. create Airflow connection ID for HTTP: click "Admin", click "Connections", click "Add a new record", configure the connection as follows and then click "Save"
    Connection Id: puton_conn_id (can be any name)
    Connection Type: HTTP
-   Host: cloud function url, mine is "https://us-central1-pigpig-project-432914.cloudfunctions.net/scraping-function-001"
+   Host: cloud function url, mine is "https://us-central1-pigpig-project-432914.cloudfunctions.net/OSP_scraping"
 
 11. put the connection id , mine is "my_gcp_conn" as the value for the variable "BQ_CONN_ID" and HTTP connection id, mine is "puton_conn_id" as the value for the variable "HTTP_CONN_ID" in the dag file
 
