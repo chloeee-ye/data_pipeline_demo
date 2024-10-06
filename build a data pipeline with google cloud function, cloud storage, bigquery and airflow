@@ -2,7 +2,7 @@ Prerequisites:
   1. Install WSL: can follow the guide here: https://learn.microsoft.com/en-us/windows/wsl/install
   2. Docker Desktop: https://docs.docker.com/desktop/install/mac-install/
   3. Signup a bigquery account and create a project, a dataset and a table
-  4. A Google Cloud Function deployed for downloading data from website and can be triggered by HTTP, my cloud function called "scraping-function-001"
+  4. A Google Cloud Function deployed for downloading data from website and can be triggered by HTTP, my cloud function called "OSP_scraping". Guide for deploying cloud function can be found here:
      * we can set it as public for easier access for our own study and experiment purpose through:
        1) click the cloud function you deployed, click the "PERMISSIONS" tab, click "GRANT ACCESS", input "allUsers" as new principles, choose "Cloud Function Invokers" as role, click save
        2) click "View in Cloud Run" on the top right corner, click the "SECURITY" tab, choose "Allow unauthenticated invocations"
