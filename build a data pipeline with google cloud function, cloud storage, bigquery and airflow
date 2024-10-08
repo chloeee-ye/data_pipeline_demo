@@ -135,41 +135,48 @@ with DAG(
             autodetect=True,  # Automatically detect the schema from the CSV file
         )
 
-    # ## Task 3: fetch and clean the raw data from the london_recent_crime_data_raw table and insert the data to the staging dataset
+    # ## Task 3: fetch and clean the raw data from the insert the data to the dataset
     cleaning_OSP_data_insert = BigQueryOperator(
-            task_id='cleaning_OSP_data_insert',
-            sql='''
-                WITH cleaned_coordinates AS (
-                SELECT 
-                    string_field_0 AS name,
-                    SPLIT(REPLACE(REPLACE(REPLACE(TRIM(string_field_1), '[', ''), ']', ''), "'", ''), ' ') AS coord_array
-                FROM `pigpig-project-432914.pigpigdata.osp_public_estate_geo_raw`
-                )
+        task_id='cleaning_OSP_data_insert',
+        sql='''
+            SELECT 
+                string_field_0 AS name,
+                SPLIT(REPLACE(REPLACE(REPLACE(string_field_1, '[', ''), ']', ''), "'", ''), ' ') AS coord_array
+                FROM `pigpig-project-432914.pigpigdata.osp_public_estate_geo_raw`      
+        ''',
+        destination_dataset_table=f"{ BQ_PROJECT }.{ BQ_DATASET }.osp_public_estate_geo",    
+        write_disposition='WRITE_TRUNCATE',
+        create_disposition='CREATE_IF_NEEDED',
+        allow_large_results=True,
+        use_legacy_sql=False,
+        gcp_conn_id=BQ_CONN_ID,
+        dag=dag
+    )
 
-                SELECT 
-                name,
-                ST_GEOGFROMTEXT(CONCAT('POLYGON(( ',
-                    STRING_AGG(CONCAT(SPLIT(coord, ',')[OFFSET(1)], ' ', SPLIT(coord, ',')[OFFSET(0)]), ', '), 
-                    ' ))')) AS polygon
-                FROM cleaned_coordinates,
-                UNNEST(coord_array) AS coord 
-                GROUP BY name
-            ''',
-            destination_project_dataset_table='{0}.{1}.osp_public_estate_polygon'.format(
-                BQ_PROJECT, BQ_DATASET
-            ),     
-            write_disposition='WRITE_TRUNCATE',
-            create_disposition='CREATE_IF_NEEDED',
-            allow_large_results=True,
-            use_legacy_sql=False,
-            gcp_conn_id='my_gcp_conn',
-            dag=dag
-        )
-
-
+   # ## Task 4: agg data
+    agg_OSP_data_insert = BigQueryOperator(
+        task_id='agg_OSP_data_insert',
+        sql='''
+            SELECT 
+            name,
+            ST_GEOGFROMTEXT(CONCAT('POLYGON(( ',
+                STRING_AGG(CONCAT(SPLIT(coord, ',')[OFFSET(1)], ' ', SPLIT(coord, ',')[OFFSET(0)]), ', '), 
+                ' ))')) AS polygon
+            FROM `pigpig-project-432914.pigpigdata.osp_public_estate_geo`,
+            UNNEST(coord_array) AS coord 
+            GROUP BY name    
+        ''',
+        destination_dataset_table=f"{ BQ_PROJECT }.{ BQ_DATASET }.osp_public_estate_geo",    
+        write_disposition='WRITE_TRUNCATE',
+        create_disposition='CREATE_IF_NEEDED',
+        allow_large_results=True,
+        use_legacy_sql=False,
+        gcp_conn_id=BQ_CONN_ID,
+        dag=dag
+    )
 
     # #Setting up Dependencies
-     trigger_cloud_function >> load_csv_to_bigquery >> cleaning_OSP_data_insert
+trigger_cloud_function >> load_csv_to_bigquery >> cleaning_OSP_data_insert >> agg_OSP_data_insert
 
 ## end of the script ##
 
