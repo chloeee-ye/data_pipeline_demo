@@ -1,0 +1,91 @@
+  import json
+  from datetime import timedelta, datetime
+
+  from airflow import DAG
+
+  from airflow.contrib.operators.bigquery_operator import BigQueryOperator
+  from airflow.providers.google.cloud.operators.bigquery import BigQueryCheckOperator
+
+  default_args = {
+    'owner': 'airflow',
+    'depends_on_past': True,    
+    'start_date': datetime(2024, 8, 18),
+    'end_date': datetime(2024, 8, 31),
+    'email': ['airflow@airflow.com'],
+    'email_on_failure': True,
+    'email_on_retry': False,
+    'retries': 2,
+    'retry_delay': timedelta(minutes=5),
+  }
+
+  # Set Schedule: Run pipeline once a day. 
+  # Use cron to define exact time. Eg. 8:15am would be "15 08 * * *"
+  schedule_interval = "44 21 * * *"
+
+  # Define DAG: Set ID and assign default args and schedule interval
+  dag = DAG(
+    'bigquery_demo', 
+    default_args=default_args, 
+    schedule_interval=schedule_interval
+      )
+
+  # Config variables
+  BQ_CONN_ID = "my_gcp_conn"
+  BQ_PROJECT = "pigpig-project-432914"
+  BQ_DATASET = "pigpigdata"
+
+  ## Task 1: check that the data table is existed in the dataset
+
+  t1 = BigQueryCheckOperator(
+        task_id='bq_check_data',
+        sql='''
+        SELECT
+            COUNT(DISTINCT industry) AS ct
+        FROM
+        `pigpig-project-432914.pigpigdata.2023climate`
+        ''',
+        use_legacy_sql=False,
+        gcp_conn_id = BQ_CONN_ID,
+        dag=dag
+    )
+
+
+
+  # ## Task 2: Run a query and store the result to another table
+  t2 = BigQueryOperator(
+        task_id='bq_write_to_climate_inter',
+        sql='''
+        #standardSQL
+        SELECT
+          *,
+          ROW_NUMBER() OVER (PARTITION BY industry ORDER BY value DESC) AS rn
+        FROM `pigpig-project-432914.pigpigdata.2023climate` 
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY industry ORDER BY value DESC) = 1
+        ''',
+        destination_dataset_table='{0}.{1}.climate_inter'.format(
+            BQ_PROJECT, BQ_DATASET
+        ),    
+        write_disposition='WRITE_TRUNCATE',
+        allow_large_results=True,
+        use_legacy_sql=False,
+        gcp_conn_id=BQ_CONN_ID,
+        dag=dag
+      )
+
+  # # Task 3: Check if inter data is written successfully
+  t3 = BigQueryCheckOperator(
+    task_id='bq_check_climate_inter',
+    sql='''
+    #standardSQL
+    SELECT
+        COUNT(*) AS rows_in_partition
+    FROM `{0}.{1}.climate_inter`
+    '''.format(BQ_PROJECT, BQ_DATASET
+        ),
+    use_legacy_sql=False,
+    gcp_conn_id=BQ_CONN_ID,
+    dag=dag)
+
+  #Setting up Dependencies
+  t2.set_upstream(t1)
+  t3.set_upstream(t2)
