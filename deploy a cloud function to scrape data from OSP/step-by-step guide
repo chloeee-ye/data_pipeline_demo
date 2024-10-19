@@ -1,1 +1,16 @@
 
+
+requirements:
+functions-framework==3.*
+beautifulsoup4
+requests
+google-cloud-storage
+
+Step by step:
+1) go to Cloud Run functions, click "CREATE FUNCTION"
+2) input "Function name", "Region", choose "HHTPS" as "Trigger type", click next
+3) choose "Python 3.9" as "Runtime", choose "Inline Editor" as "Source code"
+4) input "main" as "Entry point"
+5) paste the function script into the main tab
+6) paste the requirements into the requirements tab
+7) click DEPLOY
