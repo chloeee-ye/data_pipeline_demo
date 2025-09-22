@@ -1,6 +1,7 @@
-
-requirements:
 functions-framework==3.*
-beautifulsoup4
-requests
+selenium
+pandas
 google-cloud-storage
+webdriver-manager
+openpyxl
+webdriver_manager
