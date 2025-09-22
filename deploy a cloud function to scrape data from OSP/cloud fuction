@@ -1,117 +1,130 @@
-
-import functions_framework
-import requests
-from bs4 import BeautifulSoup
-import time
-from datetime import datetime, timedelta
-import json
-import zipfile
 import os
+import logging
+import pandas as pd
 from google.cloud import storage
-from flask import Flask, make_response
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from io import BytesIO
+from webdriver_manager.chrome import ChromeDriverManager
 
-##function to fetch data from authority
-@functions_framework.http
-def download_and_upload_data(request):
-    """Downloads, processes, and uploads Metropolitan Police crime data from data.police.uk to GCS."""
-    run_date = request.args.get('date')
 
-    # Step 1: Send a GET request to the custom download page URL
-    headers = {
-        'Referer': 'https://data.police.uk/data/'
-    }
+print(os.path.exists('/usr/local/bin/chromedriver'))  # Should return True
 
-    response = requests.get("https://data.police.uk/data/", headers=headers)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    if response.status_code == 200:
-        # Step 2: Parse HTML content and locate the form
-        soup = BeautifulSoup(response.content, "html.parser")
-        form = soup.find("form")
+def download_excel_from_gcs(bucket_name, file_name):
+    """Download an Excel file from Google Cloud Storage and return a DataFrame."""
+    logging.info(f"Downloading Excel file '{file_name}' from bucket '{bucket_name}'.")
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(file_name)
+    data = blob.download_as_bytes()
+    logging.info(f"Successfully downloaded '{file_name}'.")
+    return pd.read_excel(BytesIO(data))
 
-        # Step 3: Extract the CSRF token from the response cookies
-        csrf_token = response.cookies.get('csrftoken')
+def initialize_driver():
+    """Initialize the WebDriver in headless mode."""
+    logging.info("Initializing WebDriver.")
+    
+    # Set ChromeOptions with port specification
+    options = Options()
+    #options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.binary_location = "/usr/bin/google-chrome"  # Update with Docker container's Chrome binary path
+    #options.binary_location = "C:\Program Files(x86)\Google\Chrome\Application\chrome.exe"
+    options.add_argument("--remote-debugging-port=9515")  # Specify the port here
 
-        current_date = datetime.strptime(run_date, '%Y-%m-%d')
-        minus_one_month = (current_date - timedelta(days=30)).strftime("%Y-%m")
-        print('Input date minus one month is ' + minus_one_month)
+    #service = Service(ChromeDriverManager().install())
+    service = Service('/usr/local/bin/chromedriver')
+    driver = webdriver.Chrome(service=service, options=options)
+    
+    logging.info("WebDriver initialized successfully.")
+    return driver
 
-        # Step 4: Extract form data including hidden fields or required parameters
-        form_data = {
-            "csrfmiddlewaretoken": csrf_token,
-            'date_from': "2024-01",
-            'date_to': "2024-01",
-            'forces': ['metropolitan'],
-            'include_crime': 'on'
-            # Add any other required form fields
-        }
 
-        # Step 5: Simulate form submission by sending a POST request with CSRF cookie
-        submit_url = "https://data.police.uk/data/"
-        cookies = {
-            'csrftoken': csrf_token
-        }
-        response = requests.post(submit_url, data=form_data, headers=headers, cookies=cookies, allow_redirects=False)
-        
-        if response.status_code == 302:
-            # Step 6: Retrieve refreshed page locatoin after form submission
-            location = response.headers.get('location')
-            print(location)
-            # Step 7: Retrieve the session ID from the location and access the progress page for the download URL
-            substring_to_remove = "/data/fetch/"
-            result_string = location.replace(substring_to_remove, "")
 
-            redirected_response = requests.get("https://data.police.uk/data/progress/" + result_string)
-            
-            download_url = None
 
-            # Step 8: Extract the download URL from the JSON response
-            refreshed_page_content = redirected_response.content.decode('utf-8')
-            print(refreshed_page_content)
-            refreshed_page_json = json.loads(refreshed_page_content)
-            print(refreshed_page_json)
-            download_url = refreshed_page_json['url']
-            print(download_url)
+def perform_search_with_js(driver, query):
+    """Perform a search using JavaScript to interact with the search box."""
+    logging.info(f"Performing search with query: {query}")
+    driver.get("https://www.openstreetmap.org/")
+    search_box = driver.find_element(By.ID, "query")
+    driver.execute_script("arguments[0].value = arguments[1];", search_box, query)
+    search_box.submit()
+    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "search_results_entry")))
+    logging.info("Search executed successfully.")
 
-            # Step 9: Download the file
-            if download_url:
-                response = requests.get(download_url)
-                if response.status_code == 200:
-                    file_name = "crime_data_metropolitan.zip"  # Adjust the file name if needed
-                    with open(file_name, "wb") as file:
-                        file.write(response.content)
-                    print("Metropolitan Police crime data downloaded successfully.")
-                    # Step 10: Unzip the file
-                    with zipfile.ZipFile(file_name, 'r') as zip_ref:
-                        zip_ref.extractall()
+def output_li_elements_text(driver):
+    """Extract text content from specific <li> elements."""
+    li_url_list = []
+    try:
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "search_results_entry")))
+        li_elements = driver.find_elements(By.CSS_SELECTOR, "li.list-group-item.list-group-item-action.search_results_entry")
+        for li_element in li_elements:
+            a_element = li_element.find_element(By.TAG_NAME, "a")
+            data_prefix = a_element.get_attribute("data-prefix")
+            if data_prefix == "Residential Area":
+                li_url_list.append(a_element.get_attribute("href"))
+        logging.info(f"Extracted {len(li_url_list)} URLs for residential areas.")
+    except Exception as e:
+        logging.error(f"An error occurred while extracting elements: {str(e)}")
+    return li_url_list
 
-                    # Step 11: Move the CSV file to desired location
-                    extracted_file_name = "2024-01" + "-metropolitan-street.csv" # Adjust the file name if needed
-                    renamed_file_name = "crime-metropolitan-street.csv"
-                    os.rename("2024-01" + "/" + extracted_file_name, renamed_file_name)  # Move the file to the desired location
+def main(request):
+    """Main function to handle Cloud Function requests."""
+    bucket_name = 'puton_bucket_001'
+    excel_file_name = 'public estate list.xlsx'
+    
+    logging.info("Starting processing.")
+    
+    # Download Excel file from GCS
+    public_estate_list_df = download_excel_from_gcs(bucket_name, excel_file_name)
+    search_results = []
 
-                    print("CSV file extracted and saved successfully.")
+    driver = initialize_driver()
+    try:
+        for index, row in public_estate_list_df.iterrows():
+            search_term = row['name']
+            geo_list = []
+            logging.info(f"Processing search term: {search_term}")
+            try:
+                perform_search_with_js(driver, search_term)
+                li_url_list = output_li_elements_text(driver)
 
-                    # Step 12: Upload the CSV file to a GCS bucket
-                    bucket_name = 'puton_bucket_001'  # Replace with your GCS bucket name
-                    file_path = renamed_file_name  # Path to the CSV file
-                    destination_blob_name = 'crime-metropolitan-street.csv'  # Desired path and filename in the bucket
+                for url in li_url_list:
+                    driver.get(url)
+                    latitude = driver.find_element(By.CLASS_NAME, "latitude").text
+                    longitude = driver.find_element(By.CLASS_NAME, "longitude").text
+                    geo_list.append(f"{latitude},{longitude}")
+                    driver.back()
 
-                    storage_client = storage.Client()
-                    bucket = storage_client.bucket(bucket_name)
-                    blob = bucket.blob(destination_blob_name)
-                    blob.upload_from_filename(file_path)
+                search_results.append({"Search Term": search_term, "Geo List": geo_list})
 
-                    print("CSV file uploaded to Google Cloud Storage successfully.")
-                else:
-                    print("Failed to download Metropolitan Police crime data.")
-                    return make_response("Failed to download Metropolitan Police crime data.", 500)
-            else:
-                print("Download URL not found.")
-                return make_response("Download URL not found.", 500)
-        else:
-            print("Form submission failed.")
-            return make_response("Form submission failed.", 500)
-    else:
-        print("Failed to access the custom download page.")
-        return make_response("Failed to access the custom download page.", 500)
-    return "Process completed successfully."
+            except Exception as e:
+                logging.error(f"An error occurred during processing for {search_term}: {str(e)}")
+
+    finally:
+        driver.quit()
+        logging.info("WebDriver closed.")
+
+    # Create a DataFrame and save to CSV
+    df = pd.DataFrame(search_results)
+    output_file_path = 'public_estate_geo.csv'
+    df.to_csv(output_file_path, index=False)
+    logging.info(f"Data saved to {output_file_path}.")
+
+    # Upload the CSV file to Google Cloud Storage
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob('public_estate_geo.csv')
+    blob.upload_from_filename(output_file_path)
+    logging.info("CSV uploaded successfully.")
+
+    return "Processing completed and data uploaded."
